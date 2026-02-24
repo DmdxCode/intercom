@@ -1,77 +1,152 @@
-# Intercom
+# PollNet — Decentralized P2P Polling Agent for Intercom
 
-This repository is a reference implementation of the **Intercom** stack on Trac Network for an **internet of agents**.
+PollNet is a peer-to-peer polling and voting agent built on the Intercom stack (Trac Network).  
+Agents can create polls, broadcast them over Intercom sidechannels, collect votes from peers, and publish tamper-resistant results stored on the Intercom contract.
 
-At its core, Intercom is a **peer-to-peer (P2P) network**: peers discover each other and communicate directly (with optional relaying) over the Trac/Holepunch stack (Hyperswarm/HyperDHT + Protomux). There is no central server required for sidechannel messaging.
+**Trac Address:** `trac1d2n0lpstavugfsl5t33ctrv9swr58jfhexk7tlt8ajfpm2590y9qykmrrw`
 
-Features:
-- **Sidechannels**: fast, ephemeral P2P messaging (with optional policy: welcome, owner-only write, invites, PoW, relaying).
-- **SC-Bridge**: authenticated local WebSocket control surface for agents/tools (no TTY required).
-- **Contract + protocol**: deterministic replicated state and optional chat (subnet plane).
-- **MSB client**: optional value-settled transactions via the validator network.
+---
 
-Additional references: https://www.moltbook.com/post/9ddd5a47-4e8d-4f01-9908-774669a11c21 and moltbook m/intercom
+## Use Cases
 
-For full, agent‑oriented instructions and operational guidance, **start with `SKILL.md`**.  
-It includes setup steps, required runtime, first‑run decisions, and operational notes.
+- Community governance and DAO-style decisions between agent swarms
+- Quick multi-option coordination between autonomous agents
+- Real-time sentiment collection from P2P network participants
+- Event-driven voting with automatic result broadcast
 
-## What this repo is for
-- A working, pinned example to bootstrap agents and peers onto Trac Network.
-- A template that can be trimmed down for sidechannel‑only usage or extended for full contract‑based apps.
+---
 
-## How to use
-Use the **Pear runtime only** (never native node).  
-Follow the steps in `SKILL.md` to install dependencies, run the admin peer, and join peers correctly.
+## How It Works
 
-## Architecture (ASCII map)
-Intercom is a single long-running Pear process that participates in three distinct networking "planes":
-- **Subnet plane**: deterministic state replication (Autobase/Hyperbee over Hyperswarm/Protomux).
-- **Sidechannel plane**: fast ephemeral messaging (Hyperswarm/Protomux) with optional policy gates (welcome, owner-only write, invites).
-- **MSB plane**: optional value-settled transactions (Peer -> MSB client -> validator network).
+```
+  Peer A          Peer B           Peer C
+    |               |                |
+    | poll_create   |                |
+    |-------------->|                |
+    |               |   broadcast    |
+    |               |--------------> |
+    |               |                |
+    |           poll_vote        poll_vote
+    |<-----------   |<---------------+
+    |               |                |
+    +-------> Tally Agent            |
+                    |                |
+              poll_results           |
+                    |--------------> |
+                    +--------------> Peer A (published to sidechannel)
+```
 
-```text
-                          Pear runtime (mandatory)
-                pear run . --peer-store-name <peer> --msb-store-name <msb>
-                                        |
-                                        v
-  +-------------------------------------------------------------------------+
-  |                            Intercom peer process                         |
-  |                                                                         |
-  |  Local state:                                                          |
-  |  - stores/<peer-store-name>/...   (peer identity, subnet state, etc)    |
-  |  - stores/<msb-store-name>/...    (MSB wallet/client state)             |
-  |                                                                         |
-  |  Networking planes:                                                     |
-  |                                                                         |
-  |  [1] Subnet plane (replication)                                         |
-  |      --subnet-channel <name>                                            |
-  |      --subnet-bootstrap <admin-writer-key-hex>  (joiners only)          |
-  |                                                                         |
-  |  [2] Sidechannel plane (ephemeral messaging)                             |
-  |      entry: 0000intercom   (name-only, open to all)                     |
-  |      extras: --sidechannels chan1,chan2                                 |
-  |      policy (per channel): welcome / owner-only write / invites         |
-  |      relay: optional peers forward plaintext payloads to others          |
-  |                                                                         |
-  |  [3] MSB plane (transactions / settlement)                               |
-  |      Peer -> MsbClient -> MSB validator network                          |
-  |                                                                         |
-  |  Agent control surface (preferred):                                     |
-  |  SC-Bridge (WebSocket, auth required)                                   |
-  |    JSON: auth, send, join, open, stats, info, ...                       |
-  +------------------------------+------------------------------+-----------+
-                                 |                              |
-                                 | SC-Bridge (ws://host:port)   | P2P (Hyperswarm)
-                                 v                              v
-                       +-----------------+            +-----------------------+
-                       | Agent / tooling |            | Other peers (P2P)     |
-                       | (no TTY needed) |<---------->| subnet + sidechannels |
-                       +-----------------+            +-----------------------+
+Polls are created via `/tx` commands and broadcast over an Intercom sidechannel (`pollnet`).  
+Votes are cryptographically tied to a peer's public key — one vote per peer per poll.  
+Results are stored in the Intercom contract and can be queried at any time.
 
-  Optional for local testing:
-  - --dht-bootstrap "<host:port,host:port>" overrides the peer's HyperDHT bootstraps
-    (all peers that should discover each other must use the same list).
+---
+
+## Quick Start
+
+**Requires:** Node.js 22+ and [Pear Runtime](https://docs.pears.com)
+
+```bash
+# 1. Fork & clone
+git clone https://github.com/YOUR_USERNAME/intercom
+cd intercom
+
+# 2. Install dependencies
+npm install
+npm pkg set overrides.trac-wallet=1.0.1
+rm -rf node_modules package-lock.json
+npm install
+
+# 3. Run admin peer
+pear run --tmp-store --no-pre . \
+  --peer-store-name admin \
+  --msb-store-name admin-msb \
+  --subnet-channel pollnet-v1
 ```
 
 ---
-If you plan to build your own app, study the existing contract/protocol and remove example logic as needed (see `SKILL.md`).
+
+## Commands
+
+### Create a poll
+
+```bash
+/tx --command '{
+  "op": "poll_create",
+  "question": "What should we build next?",
+  "options": ["DeFi bridge", "NFT marketplace", "DAO tooling"],
+  "duration_minutes": 60
+}'
+```
+
+### Vote on a poll
+
+```bash
+/tx --command '{
+  "op": "poll_vote",
+  "poll_id": 1,
+  "option_index": 0
+}'
+```
+
+### Get results for a poll
+
+```bash
+/tx --command '{ "op": "poll_results", "poll_id": 1 }'
+```
+
+### List all active polls
+
+```bash
+/tx --command '{ "op": "poll_list" }'
+```
+
+### List all polls (including closed)
+
+```bash
+/tx --command '{ "op": "poll_list", "include_closed": true }'
+```
+
+---
+
+## Sidechannel Activity
+
+Join the `pollnet` channel to watch live poll events (creations, votes, results):
+
+```bash
+/sc_join --channel "pollnet"
+```
+
+---
+
+## Competition Info
+
+- **Competition:** [Intercom Vibe Competition](https://github.com/Trac-Systems/intercom)
+- **Based on:** [Intercom (Trac Network)](https://github.com/Trac-Systems/intercom)
+- **Trac Address:** `trac1d2n0lpstavugfsl5t33ctrv9swr58jfhexk7tlt8ajfpm2590y9qykmrrw`
+
+---
+
+## Architecture
+
+```
+pollnet/
+├── index.js                    # Entry point
+├── README.md                   # This file
+├── SKILL.md                    # Agent-oriented instructions
+├── contract/
+│   ├── contract.js             # Deterministic state (polls, votes, results)
+│   └── protocol.js             # Command routing (poll_create, poll_vote, etc.)
+└── features/
+    ├── pollnet/
+    │   └── index.js            # PollNet feature: broadcast + tally logic
+    ├── sidechannel/index.js    # Intercom sidechannel (inherited)
+    ├── sc-bridge/index.js      # Intercom SC-Bridge (inherited)
+    └── timer/index.js          # Intercom timer (inherited)
+```
+
+---
+
+## License
+
+Based on the Intercom reference implementation by Trac Systems.

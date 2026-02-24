@@ -1,26 +1,30 @@
 {
-  "name": "contract-test-latest",
-  "version": "0.0.1",
-  "type": "module",
+  "name": "pollnet",
+  "version": "1.0.0",
+  "description": "Decentralized P2P polling agent built on Intercom (Trac Network)",
   "main": "index.js",
+  "type": "commonjs",
   "pear": {
-    "name": "contract-test-latest",
+    "name": "pollnet",
     "type": "terminal"
   },
+  "scripts": {
+    "start": "pear run --tmp-store --no-pre . --peer-store-name admin --msb-store-name admin-msb --subnet-channel pollnet-v1"
+  },
   "dependencies": {
-    "b4a": "^1.6.7",
-    "bare-ws": "2.0.3",
-    "compact-encoding": "^2.18.0",
-    "crypto": "npm:bare-node-crypto",
-    "fs": "npm:bare-node-fs",
-    "path": "npm:bare-node-path",
-    "protomux": "^3.10.1",
-    "trac-msb": "git+https://github.com/Trac-Systems/main_settlement_bus.git#5088921",
-    "trac-peer": "git+https://github.com/Trac-Systems/trac-peer.git#d108f52",
-    "trac-wallet": "1.0.1",
-    "util": "npm:bare-node-util"
+    "intercom": "github:Trac-Systems/intercom"
   },
   "overrides": {
     "trac-wallet": "1.0.1"
-  }
+  },
+  "keywords": [
+    "trac",
+    "intercom",
+    "p2p",
+    "polling",
+    "voting",
+    "agents",
+    "pear"
+  ],
+  "license": "MIT"
 }
