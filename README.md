@@ -144,6 +144,7 @@ pollnet/
     ├── sc-bridge/index.js      # Intercom SC-Bridge (inherited)
     └── timer/index.js          # Intercom timer (inherited)
 ```
+<img width="1366" height="768" alt="Screenshot 2026-02-26 at 5 36 27 PM" src="https://github.com/user-attachments/assets/ecacafcf-be66-441e-99c5-eb8f7784a481" />
 
 ---
 
