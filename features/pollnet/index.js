@@ -7,8 +7,8 @@
  * Registers /tx command handlers and sets up the timer for poll auto-close.
  */
 
-const PollNetContract = require('../../contract/contract')
-const PollNetProtocol = require('../../contract/protocol')
+import PollNetContract from '../../contract/contract.js'
+import PollNetProtocol from '../../contract/protocol.js'
 
 const TICK_INTERVAL_MS = 15_000 // Check for expired polls every 15 seconds
 
@@ -80,4 +80,4 @@ class PollNetFeature {
   }
 }
 
-module.exports = PollNetFeature
+export default PollNetFeature

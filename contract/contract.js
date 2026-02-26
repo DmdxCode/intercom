@@ -1,227 +1,240 @@
-'use strict'
+import {Contract} from 'trac-peer'
 
-/**
- * PollNet Contract
- *
- * Deterministic state machine for P2P polling on Intercom / Trac Network.
- * Stores polls, votes, and results. All state mutations go through apply().
- */
+class SampleContract extends Contract {
+    /**
+     * Extending from Contract inherits its capabilities and allows you to define your own contract.
+     * The contract supports the corresponding protocol. Both files come in pairs.
+     *
+     * Instances of this class run in contract context. The constructor is only called once on Peer
+     * instantiation.
+     *
+     * Please avoid using the following in your contract functions:
+     *
+     * No try-catch
+     * No throws
+     * No random values
+     * No http / api calls
+     * No super complex, costly calculations
+     * No massive storage of data.
+     * Never, ever modify "this.op" or "this.value", only read from it and use safeClone to modify.
+     * ... basically nothing that can lead to inconsistencies akin to Blockchain smart contracts.
+     *
+     * Running a contract on Trac gives you a lot of freedom, but it comes with additional responsibility.
+     * Make sure to benchmark your contract performance before release.
+     *
+     * If you need to inject data from "outside", you can utilize the Feature class and create your own
+     * oracles. Instances of Feature can be injected into the main Peer instance and enrich your contract.
+     *
+     * In the current version (Release 1), there is no inter-contract communication yet.
+     * This means it's not suitable yet for token standards.
+     * However, it's perfectly equipped for interoperability or standalone tasks.
+     *
+     * this.protocol: the peer's instance of the protocol managing contract concerns outside of its execution.
+     * this.options: the option stack passed from Peer instance
+     *
+     * @param protocol
+     * @param options
+     */
+    constructor(protocol, options = {}) {
+        // calling super and passing all parameters is required.
+        super(protocol, options);
 
-const MAX_QUESTION_LEN = 280
-const MAX_OPTION_LEN = 100
-const MAX_OPTIONS = 8
-const MIN_OPTIONS = 2
-const MAX_DURATION_MINUTES = 10080 // 1 week
+        // simple function registration.
+        // since this function does not expect value payload, no need to sanitize.
+        // note that the function must match the type as set in Protocol.mapTxCommand()
+        this.addFunction('storeSomething');
 
-class PollNetContract {
-  constructor () {
-    // Deterministic state
-    this.state = {
-      polls: {},
-      next_poll_id: 1
-    }
-  }
+        // now we register the function with a schema to prevent malicious inputs.
+        // the contract uses the schema generator "fastest-validator" and can be found on npmjs.org.
+        //
+        // Since this is the "value" as of Protocol.mapTxCommand(), we must take it full into account.
+        // $$strict : true tells the validator for the object structure to be precise after "value".
+        //
+        // note that the function must match the type as set in Protocol.mapTxCommand()
+        this.addSchema('submitSomething', {
+            value : {
+                $$strict : true,
+                $$type: "object",
+                op : { type : "string", min : 1, max: 128 },
+                some_key : { type : "string", min : 1, max: 128 }
+            }
+        });
 
-  /**
-   * Load existing state (called by Intercom on startup).
-   */
-  load (state) {
-    if (state && typeof state === 'object') {
-      this.state = state
-    }
-  }
+        // in preparation to add an external Feature (aka oracle), we add a loose schema to make sure
+        // the Feature key is given properly. it's not required, but showcases that even these can be
+        // sanitized.
+        this.addSchema('feature_entry', {
+            key : { type : "string", min : 1, max: 256 },
+            value : { type : "any" }
+        });
 
-  /**
-   * Export current state (called by Intercom for persistence).
-   */
-  dump () {
-    return this.state
-  }
+        // read helpers (no state writes)
+        this.addFunction('readSnapshot');
+        this.addFunction('readChatLast');
+        this.addFunction('readTimer');
+        this.addSchema('readKey', {
+            value : {
+                $$strict : true,
+                $$type: "object",
+                op : { type : "string", min : 1, max: 128 },
+                key : { type : "string", min : 1, max: 256 }
+            }
+        });
 
-  /**
-   * Apply a command to state. Must be pure / deterministic.
-   * Returns { ok, result, error, broadcast }
-   */
-  apply (command, peer) {
-    const { op } = command
+        // now we are registering the timer feature itself (see /features/time/ in package).
+        // note the naming convention for the feature name <feature-name>_feature.
+        // the feature name is given in app setup, when passing the feature classes.
+        const _this = this;
 
-    switch (op) {
-      case 'poll_create':
-        return this._pollCreate(command, peer)
-      case 'poll_vote':
-        return this._pollVote(command, peer)
-      case 'poll_results':
-        return this._pollResults(command)
-      case 'poll_list':
-        return this._pollList(command)
-      default:
-        return { ok: false, error: 'unknown_op' }
-    }
-  }
+        // this feature registers incoming data from the Feature and if the right key is given,
+        // stores it into the smart contract storage.
+        // the stored data can then be further used in regular contract functions.
+        this.addFeature('timer_feature', async function(){
+            if(false === _this.check.validateSchema('feature_entry', _this.op)) return;
+            if(_this.op.key === 'currentTime') {
+                if(null === await _this.get('currentTime')) console.log('timer started at', _this.op.value);
+                await _this.put(_this.op.key, _this.op.value);
+            }
+        });
 
-  // ─── Handlers ─────────────────────────────────────────────────────────────
-
-  _pollCreate (cmd, peer) {
-    const { question, options, duration_minutes } = cmd
-
-    // Validate question
-    if (!question || typeof question !== 'string') {
-      return { ok: false, error: 'invalid_question' }
-    }
-    if (question.trim().length === 0 || question.length > MAX_QUESTION_LEN) {
-      return { ok: false, error: `question must be 1–${MAX_QUESTION_LEN} chars` }
-    }
-
-    // Validate options
-    if (!Array.isArray(options) || options.length < MIN_OPTIONS || options.length > MAX_OPTIONS) {
-      return { ok: false, error: `options must be an array of ${MIN_OPTIONS}–${MAX_OPTIONS} items` }
-    }
-    for (const opt of options) {
-      if (typeof opt !== 'string' || opt.trim().length === 0 || opt.length > MAX_OPTION_LEN) {
-        return { ok: false, error: `each option must be a non-empty string up to ${MAX_OPTION_LEN} chars` }
-      }
-    }
-
-    // Validate duration
-    let closes_at = null
-    if (duration_minutes !== undefined) {
-      const dur = Number(duration_minutes)
-      if (!Number.isFinite(dur) || dur < 1 || dur > MAX_DURATION_MINUTES) {
-        return { ok: false, error: `duration_minutes must be 1–${MAX_DURATION_MINUTES}` }
-      }
-      closes_at = Date.now() + dur * 60 * 1000
-    }
-
-    const id = this.state.next_poll_id++
-    const poll = {
-      id,
-      question: question.trim(),
-      options: options.map(o => o.trim()),
-      votes: new Array(options.length).fill(0),
-      voters: {},           // { [publicKey]: option_index }
-      status: 'open',
-      created_by: peer,
-      created_at: Date.now(),
-      closes_at
-    }
-
-    this.state.polls[id] = poll
-
-    return {
-      ok: true,
-      result: { poll_id: id },
-      broadcast: {
-        event: 'POLL_CREATED',
-        poll_id: id,
-        question: poll.question,
-        options: poll.options,
-        closes_at: poll.closes_at
-      }
-    }
-  }
-
-  _pollVote (cmd, peer) {
-    const { poll_id, option_index } = cmd
-
-    const poll = this.state.polls[poll_id]
-    if (!poll) {
-      return { ok: false, error: 'poll_not_found' }
-    }
-    if (poll.status !== 'open') {
-      return { ok: false, error: 'poll_closed' }
+        // last but not least, you may intercept messages from the built-in
+        // chat system, and perform actions similar to features to enrich your
+        // contract. check the _this.op value after you enabled the chat system
+        // and posted a few messages.
+        this.messageHandler(async function(){
+            if(_this.op?.type === 'msg' && typeof _this.op.msg === 'string'){
+                const currentTime = await _this.get('currentTime');
+                await _this.put('chat_last', {
+                    msg: _this.op.msg,
+                    address: _this.op.address ?? null,
+                    at: currentTime ?? null
+                });
+            }
+            console.log('message triggered contract', _this.op);
+        });
     }
 
-    // Check if poll has expired (closes_at is stored but enforcement via timer)
-    if (poll.closes_at && Date.now() > poll.closes_at) {
-      poll.status = 'closed'
-      return { ok: false, error: 'poll_closed' }
+    /**
+     * A simple contract function without values (=no parameters).
+     *
+     * Contract functions must be registered through either "this.addFunction" or "this.addSchema"
+     * or it won't execute upon transactions. "this.addFunction" does not sanitize values, so it should be handled with
+     * care or be used when no payload is to be expected.
+     *
+     * Schema is recommended to sanitize incoming data from the transaction payload.
+     * The type of payload data depends on your protocol.
+     *
+     * This particular function does not expect any payload, so it's fine to be just registered using "this.addFunction".
+     *
+     * However, as you can see below, what it does is checking if an entry for key "something" exists already.
+     * With the very first tx executing it, it will return "null" (default value of this.get if no value found).
+     * From the 2nd tx onwards, it will print the previously stored value "there is something".
+     *
+     * It is recommended to check for null existence before using put to avoid duplicate content.
+     *
+     * As a rule of thumb, all "this.put()" should go at the end of function execution to avoid code security issues.
+     *
+     * Putting data is atomic, should a Peer with a contract interrupt, the put won't be executed.
+     */
+    async storeSomething(){
+        const something = await this.get('something');
+
+        console.log('is there already something?', something);
+
+        if(null === something) {
+            await this.put('something', 'there is something');
+        }
     }
 
-    // One vote per peer
-    if (poll.voters[peer] !== undefined) {
-      return { ok: false, error: 'already_voted' }
+    /**
+     * Now we are using the schema-validated function defined in the constructor.
+     *
+     * The function also showcases some of the handy features like safe functions
+     * to prevent throws and safe bigint/decimal conversion.
+     */
+    async submitSomething(){
+        // the value of some_key shouldn't be empty, let's check that
+        if(this.value.some_key === ''){
+            return new Error('Cannot be empty');
+            // alternatively false for generic errors:
+            // return false;
+        }
+
+        // of course the same works with assert (always use this.assert)
+        this.assert(this.value.some_key !== '', new Error('Cannot be empty'));
+
+        // btw, please use safeBigInt provided by the contract protocol's superclass
+        // to calculate big integers:
+        const bigint = this.protocol.safeBigInt("1000000000000000000");
+
+        // making sure it didn't fail
+        this.assert(bigint !== null);
+
+        // you can also convert a bigint string into its decimal representation (as string)
+        const decimal = this.protocol.fromBigIntString(bigint.toString(), 18);
+
+        // and back into a bigint string
+        const bigint_string = this.protocol.toBigIntString(decimal, 18);
+
+        // let's clone the value
+        const cloned = this.protocol.safeClone(this.value);
+
+        // we want to pass the time from the timer feature.
+        // since mmodifications of this.value is not allowed, add this to the clone instead for storing:
+        cloned['timestamp'] = await this.get('currentTime');
+
+        // making sure it didn't fail (be aware of false-positives if null is passed to safeClone)
+        this.assert(cloned !== null);
+
+        // and now let's stringify the cloned value
+        const stringified = this.protocol.safeJsonStringify(cloned);
+
+        // and, you guessed it, best is to assert against null once more
+        this.assert(stringified !== null);
+
+        // and guess we are parsing it back
+        const parsed = this.protocol.safeJsonParse(stringified);
+
+        // parsing the json is a bit different: instead of null, we check against undefined:
+        this.assert(parsed !== undefined);
+
+        // finally we are storing what address submitted the tx and what the value was
+        await this.put('submitted_by/'+this.address, parsed.some_key);
+
+        // printing into the terminal works, too of course:
+        console.log('submitted by', this.address, parsed);
     }
 
-    const idx = Number(option_index)
-    if (!Number.isFinite(idx) || idx < 0 || idx >= poll.options.length) {
-      return { ok: false, error: `option_index must be 0–${poll.options.length - 1}` }
+    async readSnapshot(){
+        const something = await this.get('something');
+        const currentTime = await this.get('currentTime');
+        const msgl = await this.get('msgl');
+        const msg0 = await this.get('msg/0');
+        const msg1 = await this.get('msg/1');
+        console.log('snapshot', {
+            something,
+            currentTime,
+            msgl: msgl ?? 0,
+            msg0,
+            msg1
+        });
     }
 
-    poll.voters[peer] = idx
-    poll.votes[idx]++
-
-    return {
-      ok: true,
-      result: { poll_id, option: poll.options[idx] },
-      broadcast: {
-        event: 'POLL_VOTE',
-        poll_id,
-        option: poll.options[idx],
-        votes: [...poll.votes],
-        total: poll.votes.reduce((s, v) => s + v, 0)
-      }
+    async readKey(){
+        const key = this.value?.key;
+        const value = key ? await this.get(key) : null;
+        console.log(`readKey ${key}:`, value);
     }
-  }
 
-  _pollResults (cmd) {
-    const { poll_id } = cmd
-    const poll = this.state.polls[poll_id]
-    if (!poll) {
-      return { ok: false, error: 'poll_not_found' }
+    async readChatLast(){
+        const last = await this.get('chat_last');
+        console.log('chat_last:', last);
     }
-    return { ok: true, result: this._formatPoll(poll) }
-  }
 
-  _pollList (cmd) {
-    const { include_closed } = cmd
-    const polls = Object.values(this.state.polls)
-      .filter(p => include_closed || p.status === 'open')
-      .map(p => this._formatPoll(p))
-    return { ok: true, result: { polls } }
-  }
-
-  // ─── Helpers ──────────────────────────────────────────────────────────────
-
-  _formatPoll (poll) {
-    const total = poll.votes.reduce((s, v) => s + v, 0)
-    let winner = null
-    if (total > 0) {
-      const maxVotes = Math.max(...poll.votes)
-      const winnerIdx = poll.votes.indexOf(maxVotes)
-      winner = poll.options[winnerIdx]
+    async readTimer(){
+        const currentTime = await this.get('currentTime');
+        console.log('currentTime:', currentTime);
     }
-    return {
-      poll_id: poll.id,
-      question: poll.question,
-      status: poll.status,
-      options: poll.options,
-      votes: poll.votes,
-      total,
-      winner,
-      created_at: poll.created_at,
-      closes_at: poll.closes_at
-    }
-  }
-
-  /**
-   * Called by the timer feature to close expired polls.
-   * Returns array of broadcast events for closed polls.
-   */
-  tick () {
-    const broadcasts = []
-    const now = Date.now()
-    for (const poll of Object.values(this.state.polls)) {
-      if (poll.status === 'open' && poll.closes_at && now > poll.closes_at) {
-        poll.status = 'closed'
-        const result = this._formatPoll(poll)
-        broadcasts.push({
-          event: 'POLL_CLOSED',
-          ...result
-        })
-      }
-    }
-    return broadcasts
-  }
 }
 
-module.exports = PollNetContract
+export default SampleContract;
